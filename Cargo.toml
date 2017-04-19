@@ -1,0 +1,6 @@
+[package]
+name = "scheduled-thread-pool"
+version = "0.1.0"
+authors = ["Steven Fackler <sfackler@palantir.com>"]
+
+[dependencies]
