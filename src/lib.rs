@@ -4,7 +4,6 @@
 //! possible, a scheduled thread pool can execute actions after a specific
 //! delay, or excecute actions periodically.
 #![warn(missing_docs)]
-#![doc(html_root_url = "https://docs.rs/scheduled-thread-pool/0.1.0")]
 
 extern crate antidote;
 
