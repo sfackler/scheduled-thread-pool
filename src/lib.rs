@@ -101,6 +101,7 @@ impl SharedPool {
 ///
 /// When the pool drops, all pending scheduled executions will be run, but
 /// periodic actions will not be rescheduled after that.
+#[derive(Clone)]
 pub struct ScheduledThreadPool {
     shared: Arc<SharedPool>,
 }
