@@ -5,18 +5,16 @@
 //! delay, or excecute actions periodically.
 #![warn(missing_docs)]
 
-extern crate antidote;
-
-use antidote::{Condvar, Mutex};
-use std::collections::BinaryHeap;
+use parking_lot::{Condvar, Mutex};
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
-use std::sync::Arc;
+use std::collections::BinaryHeap;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{self, AtomicBool};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use std::panic::{self, AssertUnwindSafe};
 
-use thunk::Thunk;
+use crate::thunk::Thunk;
 
 mod thunk;
 
@@ -91,7 +89,7 @@ impl SharedPool {
         match inner.queue.peek() {
             None => self.cvar.notify_all(),
             Some(e) if e.time > job.time => self.cvar.notify_all(),
-            _ => {}
+            _ => 0usize,
         };
         inner.queue.push(job);
     }
@@ -288,9 +286,11 @@ impl Worker {
                 Some(e) => Need::WaitTimeout(e.time - now),
             };
 
-            inner = match need {
-                Need::Wait => self.shared.cvar.wait(inner),
-                Need::WaitTimeout(t) => self.shared.cvar.wait_timeout(inner, t).0,
+            match need {
+                Need::Wait => self.shared.cvar.wait(&mut inner),
+                Need::WaitTimeout(t) => {
+                    self.shared.cvar.wait_until(&mut inner, now + t);
+                }
             };
         }
 
