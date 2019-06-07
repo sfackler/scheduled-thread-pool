@@ -8,6 +8,7 @@ repository = "https://github.com/sfackler/scheduled-thread-pool"
 readme = "README.md"
 keywords = ["threadpool", "pool"]
 categories = ["concurrency"]
+edition = "2018"
 
 [dependencies]
-antidote = "1.0"
+parking_lot = "0.8"
