@@ -19,6 +19,7 @@ use crate::thunk::Thunk;
 mod thunk;
 
 /// A handle to a scheduled job.
+#[derive(Debug)]
 pub struct JobHandle(Arc<AtomicBool>);
 
 impl JobHandle {
