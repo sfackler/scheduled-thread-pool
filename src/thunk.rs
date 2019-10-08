@@ -9,14 +9,13 @@
 // except according to those terms.
 
 pub struct Thunk<'a, A = (), R = ()> {
-    invoke: Box<Invoke<A, R> + Send + 'a>,
+    invoke: Box<dyn Invoke<A, R> + Send + 'a>,
 }
 
 impl<'a, R> Thunk<'a, (), R> {
     pub fn new<F>(func: F) -> Thunk<'a, (), R>
     where
-        F: FnOnce() -> R,
-        F: Send + 'a,
+        F: FnOnce() -> R + Send + 'a,
     {
         Thunk::with_arg(move |()| func())
     }
@@ -25,8 +24,7 @@ impl<'a, R> Thunk<'a, (), R> {
 impl<'a, A, R> Thunk<'a, A, R> {
     pub fn with_arg<F>(func: F) -> Thunk<'a, A, R>
     where
-        F: FnOnce(A) -> R,
-        F: Send + 'a,
+        F: FnOnce(A) -> R + Send + 'a,
     {
         Thunk {
             invoke: Box::<F>::new(func),

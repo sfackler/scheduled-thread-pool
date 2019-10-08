@@ -32,11 +32,11 @@ impl JobHandle {
 enum JobType {
     Once(Thunk<'static>),
     FixedRate {
-        f: Box<FnMut() + Send + 'static>,
+        f: Box<dyn FnMut() + Send + 'static>,
         rate: Duration,
     },
     FixedDelay {
-        f: Box<FnMut() + Send + 'static>,
+        f: Box<dyn FnMut() + Send + 'static>,
         delay: Duration,
     },
 }
@@ -206,7 +206,7 @@ impl ScheduledThreadPool {
         let job = Job {
             type_: JobType::FixedRate {
                 f: Box::new(f),
-                rate: rate,
+                rate,
             },
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
@@ -238,7 +238,7 @@ impl ScheduledThreadPool {
         let job = Job {
             type_: JobType::FixedDelay {
                 f: Box::new(f),
-                delay: delay,
+                delay,
             },
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
@@ -254,7 +254,7 @@ struct Worker {
 
 impl Worker {
     fn start(name: Option<String>, shared: Arc<SharedPool>) {
-        let mut worker = Worker { shared: shared };
+        let mut worker = Worker { shared };
 
         let mut thread = thread::Builder::new();
         if let Some(name) = name {
@@ -308,7 +308,7 @@ impl Worker {
             JobType::FixedRate { mut f, rate } => {
                 f();
                 let new_job = Job {
-                    type_: JobType::FixedRate { f: f, rate: rate },
+                    type_: JobType::FixedRate { f, rate },
                     time: job.time + rate,
                     canceled: job.canceled,
                 };
@@ -317,7 +317,7 @@ impl Worker {
             JobType::FixedDelay { mut f, delay } => {
                 f();
                 let new_job = Job {
-                    type_: JobType::FixedDelay { f: f, delay: delay },
+                    type_: JobType::FixedDelay { f, delay },
                     time: Instant::now() + delay,
                     canceled: job.canceled,
                 };
@@ -349,7 +349,7 @@ mod test {
             });
         }
 
-        assert_eq!(rx.iter().take(TEST_TASKS).fold(0, |a, b| a + b), TEST_TASKS);
+        assert_eq!(rx.iter().take(TEST_TASKS).sum::<usize>(), TEST_TASKS);
     }
 
     #[test]
@@ -366,7 +366,7 @@ mod test {
         let waiter = Arc::new(Barrier::new(TEST_TASKS as usize));
         for _ in 0..TEST_TASKS {
             let waiter = waiter.clone();
-            pool.execute(move || -> () {
+            pool.execute(move || {
                 waiter.wait();
                 panic!();
             });
@@ -384,7 +384,7 @@ mod test {
             });
         }
 
-        assert_eq!(rx.iter().take(TEST_TASKS).fold(0, |a, b| a + b), TEST_TASKS);
+        assert_eq!(rx.iter().take(TEST_TASKS).sum::<usize>(), TEST_TASKS);
     }
 
     #[test]
