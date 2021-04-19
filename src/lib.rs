@@ -20,12 +20,42 @@ mod thunk;
 
 /// A handle to a scheduled job.
 #[derive(Debug)]
-pub struct JobHandle(Arc<AtomicBool>);
+pub struct JobHandle(Arc<AtomicBool>, Arc<(Mutex<usize>, Condvar)>);
 
 impl JobHandle {
     /// Cancels the job.
     pub fn cancel(&self) {
         self.0.store(true, atomic::Ordering::SeqCst);
+    }
+
+    /// Waits for the job to finish at least once.
+    pub fn wait(&self) {
+        let mut finished = self.1.0.lock();
+        if *finished == 0 && !self.0.load(atomic::Ordering::SeqCst) {
+            self.1.1.wait(&mut finished);
+        }
+    }
+
+    /// Waits for the job to finish _times_ times for
+    /// repeating jobs, or once for non-repeating jobs.
+    pub fn wait_for(&self, times: usize) {
+        let mut finished = self.1.0.lock();
+        while *finished < times && !self.0.load(atomic::Ordering::SeqCst) {
+            self.1.1.wait(&mut finished);
+        }
+    }
+
+    /// Returns true if at least one execution has finished.
+    pub fn poll(&self) -> bool {
+        let finished = self.1.0.lock();
+        *finished >= 1
+    }
+
+    /// Returns true if the function has executed at least
+    /// _times_ times.
+    pub fn poll_for(&self, times: usize) -> bool {
+        let finished = self.1.0.lock();
+        *finished >= times
     }
 }
 
@@ -47,6 +77,7 @@ struct Job {
     type_: JobType,
     time: Instant,
     canceled: Arc<AtomicBool>,
+    finished: Arc<(Mutex<usize>, Condvar)>,
 }
 
 impl PartialOrd for Job {
@@ -177,13 +208,15 @@ impl ScheduledThreadPool {
         F: FnOnce() + Send + 'static,
     {
         let canceled = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new((Mutex::new(0usize), Condvar::new()));
         let job = Job {
             type_: JobType::Once(Thunk::new(job)),
             time: Instant::now() + delay,
             canceled: canceled.clone(),
+            finished: finished.clone(),
         };
         self.shared.run(job);
-        JobHandle(canceled)
+        JobHandle(canceled, finished)
     }
 
     /// Executes a closure after an initial delay at a fixed rate in the pool.
@@ -205,6 +238,7 @@ impl ScheduledThreadPool {
         F: FnMut() + Send + 'static,
     {
         let canceled = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new((Mutex::new(0usize), Condvar::new()));
         let job = Job {
             type_: JobType::FixedRate {
                 f: Box::new(f),
@@ -212,9 +246,10 @@ impl ScheduledThreadPool {
             },
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
+            finished: finished.clone(),
         };
         self.shared.run(job);
-        JobHandle(canceled)
+        JobHandle(canceled, finished)
     }
 
     /// Executes a closure after an initial delay at a dynamic rate in the pool.
@@ -235,13 +270,15 @@ impl ScheduledThreadPool {
             F: FnMut() -> Option<Duration> + Send + 'static
     {
         let canceled = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new((Mutex::new(0usize), Condvar::new()));
         let job = Job {
             type_: JobType::DynamicRate(Box::new(f)),
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
+            finished: finished.clone(),
         };
         self.shared.run(job);
-        JobHandle(canceled)
+        JobHandle(canceled, finished)
     }
 
     /// Executes a closure after an initial delay at a fixed rate in the pool.
@@ -264,6 +301,7 @@ impl ScheduledThreadPool {
         F: FnMut() + Send + 'static,
     {
         let canceled = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new((Mutex::new(0usize), Condvar::new()));
         let job = Job {
             type_: JobType::FixedDelay {
                 f: Box::new(f),
@@ -271,9 +309,10 @@ impl ScheduledThreadPool {
             },
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
+            finished: finished.clone(),
         };
         self.shared.run(job);
-        JobHandle(canceled)
+        JobHandle(canceled, finished)
     }
 
     /// Executes a closure after an initial delay at a dynamic rate in the pool.
@@ -295,13 +334,15 @@ impl ScheduledThreadPool {
             F: FnMut() -> Option<Duration> + Send + 'static
     {
         let canceled = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new((Mutex::new(0usize), Condvar::new()));
         let job = Job {
             type_: JobType::DynamicDelay(Box::new(f)),
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
+            finished: finished.clone()
         };
         self.shared.run(job);
-        JobHandle(canceled)
+        JobHandle(canceled, finished)
     }
 }
 
@@ -357,45 +398,69 @@ impl Worker {
 
     fn run_job(&self, job: Job) {
         if job.canceled.load(atomic::Ordering::SeqCst) {
+            // make sure no one waits for a cancelled job
+            job.finished.1.notify_all();
             return;
         }
 
         match job.type_ {
-            JobType::Once(f) => f.invoke(()),
+            JobType::Once(f) => {
+                f.invoke(());
+                // scope to drop lock immediately
+                {*(job.finished.0.lock()) += 1;}
+                // failsafe for `wait_for` on "Once" jobs
+                job.canceled.store(true, atomic::Ordering::SeqCst);
+                job.finished.1.notify_all();
+            },
             JobType::FixedRate { mut f, rate } => {
                 f();
+                {*(job.finished.0.lock()) += 1;}
+                job.finished.1.notify_all();
                 let new_job = Job {
                     type_: JobType::FixedRate { f, rate },
                     time: job.time + rate,
                     canceled: job.canceled,
+                    finished: job.finished,
                 };
                 self.shared.run(new_job)
             }
             JobType::DynamicRate(mut f) => {
-                if let Some(next_rate) = f() {
+                let dyn_rate = f();
+                {*(job.finished.0.lock()) += 1;}
+                job.finished.1.notify_all();
+                if let Some(next_rate) = dyn_rate {
                     let new_job = Job {
                         type_: JobType::DynamicRate(f),
                         time: job.time + next_rate,
                         canceled: job.canceled,
+                        finished: job.finished,
                     };
                     self.shared.run(new_job)
                 }
             }
             JobType::FixedDelay { mut f, delay } => {
                 f();
+                {*(job.finished.0.lock()) += 1;}
+                job.finished.1.notify_all();
                 let new_job = Job {
                     type_: JobType::FixedDelay { f, delay },
                     time: Instant::now() + delay,
                     canceled: job.canceled,
+                    finished: job.finished,
                 };
                 self.shared.run(new_job)
             }
             JobType::DynamicDelay(mut f) => {
-                if let Some(next_delay) = f() {
+                let dyn_delay = f();
+                {*(job.finished.0.lock()) += 1;}
+                job.finished.1.notify_all();
+                if let Some(next_delay) = dyn_delay {
+                    {*(job.finished.0.lock()) += 1;}
                     let new_job = Job {
                         type_: JobType::DynamicDelay(f),
                         time: Instant::now() + next_delay,
                         canceled: job.canceled,
+                        finished: job.finished,
                     };
                     self.shared.run(new_job)
                 }
@@ -407,8 +472,9 @@ impl Worker {
 #[cfg(test)]
 mod test {
     use std::sync::mpsc::channel;
+    use std::thread::sleep;
     use std::sync::{Arc, Barrier};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use super::ScheduledThreadPool;
 
@@ -595,5 +661,125 @@ mod test {
         rx.recv().unwrap();
         handle.cancel();
         assert!(rx.recv().is_err());
+    }
+
+    #[test]
+    fn wait() {
+        let pool = ScheduledThreadPool::new(TEST_TASKS);
+        let start_time = SystemTime::now();
+        let handle = pool.execute_after(
+            Duration::from_millis(500),
+            move || {
+                return;
+            }
+        );
+        handle.wait();
+        let before_time = start_time.elapsed().unwrap().as_millis();
+        assert!(before_time >= 500);
+
+        // ensure waiting again doesn't break and returns instantly
+        handle.wait();
+        let after_time = start_time.elapsed().unwrap().as_millis();
+        assert!(after_time - before_time < 100); // seems like a reasonable time :shrug:
+
+        // make sure "placement" of notification is correct
+        // and ensure waits don't interfere
+        let pool = ScheduledThreadPool::new(TEST_TASKS);
+        let start_time = SystemTime::now();
+        let mut handles = Vec::with_capacity(TEST_TASKS);
+        for _ in 0..TEST_TASKS {
+            handles.push(pool.execute(
+                || sleep(Duration::from_millis(500))
+            ));
+        }
+        for i in 0..TEST_TASKS {
+            handles[i].wait();
+        }
+        let time_elapsed = start_time.elapsed().unwrap().as_millis();
+        assert!(time_elapsed >= 500);
+        assert!(time_elapsed < 2000);
+    }
+
+    #[test]
+    fn wait_for_on_once() {
+        let pool = ScheduledThreadPool::new(TEST_TASKS);
+        let start_time = SystemTime::now();
+
+        let handle = pool.execute_after(
+            Duration::from_millis(500),
+            move || {
+                return;
+            }
+        );
+        handle.wait_for(3);
+        assert!(start_time.elapsed().unwrap().as_millis() >= 500);
+    }
+
+    #[test]
+    fn wait_for_on_repeating() {
+        let pool = ScheduledThreadPool::new(TEST_TASKS);
+        let start_time = SystemTime::now();
+
+        let handle = pool.execute_at_fixed_rate(
+            Duration::from_millis(500),
+            Duration::from_millis(500),
+            || {
+                return;
+            }
+        );
+        handle.wait_for(3);
+        let time_elapsed = start_time.elapsed().unwrap().as_millis();
+        assert!(time_elapsed >= 1500);
+        assert!(time_elapsed < 2000);
+        assert!(start_time.elapsed().unwrap().as_millis() - time_elapsed < 100);
+        handle.cancel();
+    }
+
+    #[test]
+    fn poll() {
+        let pool = ScheduledThreadPool::new(TEST_TASKS);
+        let handle = pool.execute_after(
+            Duration::from_millis(500),
+            move || {
+                return;
+            }
+        );
+        assert!(!handle.poll());
+        handle.wait();
+        assert!(handle.poll());
+    }
+
+    #[test]
+    fn poll_for_on_once() {
+        let pool = ScheduledThreadPool::new(TEST_TASKS);
+        let handle = pool.execute_after(
+            Duration::from_millis(500),
+            move || {
+                return;
+            }
+        );
+        assert!(!handle.poll_for(2));
+        handle.wait_for(2);
+        assert!(handle.poll_for(1));
+        // "once" jobs never finish more than once
+        assert!(!handle.poll_for(2));
+    }
+
+    #[test]
+    fn poll_for_on_repeating() {
+        let pool = ScheduledThreadPool::new(TEST_TASKS);
+        let handle = pool.execute_at_fixed_rate(
+            Duration::from_millis(500),
+            Duration::from_millis(500),
+            || {
+                return;
+            }
+        );
+        assert!(!handle.poll_for(3));
+        handle.wait_for(1);
+        assert!(!handle.poll_for(3));
+        handle.wait_for(3);
+        assert!(handle.poll_for(3));
+        handle.cancel();
     }
 }
