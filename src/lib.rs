@@ -736,6 +736,25 @@ mod test {
     }
 
     #[test]
+    fn wait_on_canceled_job() {
+        let pool = ScheduledThreadPool::new(TEST_TASKS);
+        let start_time = SystemTime::now();
+
+        let handle = pool.execute_at_fixed_rate(
+            Duration::from_millis(500),
+            Duration::from_millis(500),
+            || {
+                return;
+            }
+        );
+        handle.cancel();
+        handle.wait_for(3);
+        handle.wait();
+        let time_elapsed = start_time.elapsed().unwrap().as_millis();
+        assert!(time_elapsed < 100);
+    }
+
+    #[test]
     fn poll() {
         let pool = ScheduledThreadPool::new(TEST_TASKS);
         let handle = pool.execute_after(
