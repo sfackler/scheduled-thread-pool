@@ -2,7 +2,7 @@
 //!
 //! While a normal thread pool is only able to execute actions as soon as
 //! possible, a scheduled thread pool can execute actions after a specific
-//! delay, or excecute actions periodically.
+//! delay, or execute actions periodically.
 #![warn(missing_docs)]
 
 use parking_lot::{Condvar, Mutex};
