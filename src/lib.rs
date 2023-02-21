@@ -5,7 +5,6 @@
 //! delay, or excecute actions periodically.
 #![warn(missing_docs)]
 
-use parking_lot::{Condvar, Mutex};
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::collections::BinaryHeap;
 use std::panic::{self, AssertUnwindSafe};
@@ -14,8 +13,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::sync::*;
 use crate::thunk::Thunk;
 
+mod sync;
 mod thunk;
 
 /// A handle to a scheduled job.
@@ -92,7 +93,7 @@ impl SharedPool {
         match inner.queue.peek() {
             None => self.cvar.notify_all(),
             Some(e) if e.time > job.time => self.cvar.notify_all(),
-            _ => 0usize,
+            _ => (),
         };
         inner.queue.push(job);
     }
@@ -226,13 +227,9 @@ impl ScheduledThreadPool {
     /// # Panics
     ///
     /// If the closure panics, it will not be run again.
-    pub fn execute_at_dynamic_rate<F>(
-        &self,
-        initial_delay: Duration,
-        f: F,
-    ) -> JobHandle
-        where
-            F: FnMut() -> Option<Duration> + Send + 'static
+    pub fn execute_at_dynamic_rate<F>(&self, initial_delay: Duration, f: F) -> JobHandle
+    where
+        F: FnMut() -> Option<Duration> + Send + 'static,
     {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
@@ -286,13 +283,9 @@ impl ScheduledThreadPool {
     /// # Panics
     ///
     /// If the closure panics, it will not be run again.
-    pub fn execute_with_dynamic_delay<F>(
-        &self,
-        initial_delay: Duration,
-        f: F,
-    ) -> JobHandle
-        where
-            F: FnMut() -> Option<Duration> + Send + 'static
+    pub fn execute_with_dynamic_delay<F>(&self, initial_delay: Duration, f: F) -> JobHandle
+    where
+        F: FnMut() -> Option<Duration> + Send + 'static,
     {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
@@ -344,11 +337,9 @@ impl Worker {
                 Some(e) => Need::WaitTimeout(e.time - now),
             };
 
-            match need {
-                Need::Wait => self.shared.cvar.wait(&mut inner),
-                Need::WaitTimeout(t) => {
-                    self.shared.cvar.wait_until(&mut inner, now + t);
-                }
+            inner = match need {
+                Need::Wait => self.shared.cvar.wait(inner),
+                Need::WaitTimeout(t) => self.shared.cvar.wait_until(inner, t).0,
             };
         }
 
@@ -529,18 +520,15 @@ mod test {
 
         let mut pool2 = Some(pool.clone());
         let mut i = 0i32;
-        pool.execute_with_dynamic_delay(
-            Duration::from_millis(500),
-            move || {
-                i += 1;
-                tx.send(i).unwrap();
-                rx2.recv().unwrap();
-                if i == 2 {
-                    drop(pool2.take().unwrap());
-                }
-                Some(Duration::from_millis(500))
-            },
-        );
+        pool.execute_with_dynamic_delay(Duration::from_millis(500), move || {
+            i += 1;
+            tx.send(i).unwrap();
+            rx2.recv().unwrap();
+            if i == 2 {
+                drop(pool2.take().unwrap());
+            }
+            Some(Duration::from_millis(500))
+        });
         drop(pool);
 
         assert_eq!(Ok(1), rx.recv());
@@ -558,18 +546,15 @@ mod test {
 
         let mut pool2 = Some(pool.clone());
         let mut i = 0i32;
-        pool.execute_at_dynamic_rate(
-            Duration::from_millis(500),
-            move || {
-                i += 1;
-                tx.send(i).unwrap();
-                rx2.recv().unwrap();
-                if i == 2 {
-                    drop(pool2.take().unwrap());
-                }
-                Some(Duration::from_millis(500))
-            },
-        );
+        pool.execute_at_dynamic_rate(Duration::from_millis(500), move || {
+            i += 1;
+            tx.send(i).unwrap();
+            rx2.recv().unwrap();
+            if i == 2 {
+                drop(pool2.take().unwrap());
+            }
+            Some(Duration::from_millis(500))
+        });
         drop(pool);
 
         assert_eq!(Ok(1), rx.recv());
