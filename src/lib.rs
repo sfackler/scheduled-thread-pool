@@ -568,7 +568,7 @@ mod test {
         let pool = ScheduledThreadPool::new(TEST_TASKS);
 
         // Panic all the existing threads.
-        let waiter = Arc::new(Barrier::new(TEST_TASKS as usize));
+        let waiter = Arc::new(Barrier::new(TEST_TASKS));
         for _ in 0..TEST_TASKS {
             let waiter = waiter.clone();
             pool.execute(move || {
@@ -579,7 +579,7 @@ mod test {
 
         // Ensure the pool still works.
         let (tx, rx) = channel();
-        let waiter = Arc::new(Barrier::new(TEST_TASKS as usize));
+        let waiter = Arc::new(Barrier::new(TEST_TASKS));
         for _ in 0..TEST_TASKS {
             let tx = tx.clone();
             let waiter = waiter.clone();
@@ -714,7 +714,7 @@ mod test {
 
     fn test_jobs_stop_after_drop<F>(mut execute_fn: F)
     where
-        F: FnMut(&Arc<ScheduledThreadPool>, Sender<i32>, Receiver<()>) -> (),
+        F: FnMut(&Arc<ScheduledThreadPool>, Sender<i32>, Receiver<()>),
     {
         use super::OnPoolDropBehavior::*;
         for drop_behavior in [CompletePendingScheduled, DiscardPendingScheduled] {
