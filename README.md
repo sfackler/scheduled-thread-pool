@@ -1,5 +1,4 @@
 # scheduled-thread-pool
-[![Build Status](https://travis-ci.org/sfackler/scheduled-thread-pool.svg?branch=master)](https://travis-ci.org/sfackler/scheduled-thread-pool)
 
 [Documentation](https://docs.rs/scheduled-thread-pool)
 
