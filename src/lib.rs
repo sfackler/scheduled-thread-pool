@@ -14,10 +14,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::thunk::Thunk;
-
-mod thunk;
-
 /// A handle to a scheduled job.
 #[derive(Debug)]
 pub struct JobHandle(Arc<AtomicBool>);
@@ -30,7 +26,7 @@ impl JobHandle {
 }
 
 enum JobType {
-    Once(Thunk<'static>),
+    Once(Box<dyn FnOnce() + Send + 'static>),
     FixedRate {
         f: Box<dyn FnMut() + Send + 'static>,
         rate: Duration,
@@ -286,7 +282,7 @@ impl ScheduledThreadPool {
     {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::Once(Thunk::new(job)),
+            type_: JobType::Once(Box::new(job)),
             time: Instant::now() + delay,
             canceled: canceled.clone(),
         };
@@ -468,7 +464,7 @@ impl Worker {
         }
 
         match job.type_ {
-            JobType::Once(f) => f.invoke(()),
+            JobType::Once(f) => f(),
             JobType::FixedRate { mut f, rate } => {
                 f();
                 let new_job = Job {
