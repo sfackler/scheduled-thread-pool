@@ -12,7 +12,7 @@ impl NumThreadsStage {
     ///
     /// Panics if `num_threads` is 0.
     pub fn num_threads<'a>(self, num_threads: usize) -> FinalStage<'a> {
-        assert!(num_threads > 0);
+        assert!(num_threads > 0, "num_threads must be positive");
         FinalStage {
             num_threads,
             thread_name_pattern: None,
