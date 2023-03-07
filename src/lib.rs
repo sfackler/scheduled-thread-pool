@@ -203,9 +203,17 @@ impl ScheduledThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
+        self.execute_after_inner(delay, Box::new(job))
+    }
+
+    fn execute_after_inner(
+        &self,
+        delay: Duration,
+        job: Box<dyn FnOnce() + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::Once(Box::new(job)),
+            type_: JobType::Once(job),
             time: Instant::now() + delay,
             canceled: canceled.clone(),
         };
@@ -231,12 +239,18 @@ impl ScheduledThreadPool {
     where
         F: FnMut() + Send + 'static,
     {
+        self.execute_at_fixed_rate_inner(initial_delay, rate, Box::new(f))
+    }
+
+    fn execute_at_fixed_rate_inner(
+        &self,
+        initial_delay: Duration,
+        rate: Duration,
+        f: Box<dyn FnMut() + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::FixedRate {
-                f: Box::new(f),
-                rate,
-            },
+            type_: JobType::FixedRate { f, rate },
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
         };
@@ -257,9 +271,17 @@ impl ScheduledThreadPool {
     where
         F: FnMut() -> Option<Duration> + Send + 'static,
     {
+        self.execute_at_dynamic_rate_inner(initial_delay, Box::new(f))
+    }
+
+    fn execute_at_dynamic_rate_inner(
+        &self,
+        initial_delay: Duration,
+        f: Box<dyn FnMut() -> Option<Duration> + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::DynamicRate(Box::new(f)),
+            type_: JobType::DynamicRate(f),
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
         };
@@ -286,12 +308,18 @@ impl ScheduledThreadPool {
     where
         F: FnMut() + Send + 'static,
     {
+        self.execute_with_fixed_delay_inner(initial_delay, delay, Box::new(f))
+    }
+
+    fn execute_with_fixed_delay_inner(
+        &self,
+        initial_delay: Duration,
+        delay: Duration,
+        f: Box<dyn FnMut() + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::FixedDelay {
-                f: Box::new(f),
-                delay,
-            },
+            type_: JobType::FixedDelay { f, delay },
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
         };
@@ -313,9 +341,17 @@ impl ScheduledThreadPool {
     where
         F: FnMut() -> Option<Duration> + Send + 'static,
     {
+        self.execute_with_dynamic_delay_inner(initial_delay, Box::new(f))
+    }
+
+    fn execute_with_dynamic_delay_inner(
+        &self,
+        initial_delay: Duration,
+        f: Box<dyn FnMut() -> Option<Duration> + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::DynamicDelay(Box::new(f)),
+            type_: JobType::DynamicDelay(f),
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
         };
