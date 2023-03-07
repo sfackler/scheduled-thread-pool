@@ -5,6 +5,7 @@
 //! delay, or execute actions periodically.
 #![warn(missing_docs)]
 
+use crate::builder::{FinalStage, NumThreadsStage};
 use parking_lot::{Condvar, Mutex};
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::collections::BinaryHeap;
@@ -13,6 +14,8 @@ use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+pub mod builder;
 
 /// A handle to a scheduled job.
 #[derive(Debug)]
@@ -109,78 +112,6 @@ pub enum OnPoolDropBehavior {
     DiscardPendingScheduled,
 }
 
-/// A builder for a scheduled thread pool.
-pub struct ScheduledThreadPoolBuilder<'a> {
-    thread_name_prefix: Option<&'a str>,
-    on_drop_behavior: OnPoolDropBehavior,
-}
-
-impl<'a> ScheduledThreadPoolBuilder<'a> {
-    /// Constructs a new `ScheduledThreadPoolBuilder`.
-    ///
-    /// Parameters are initialized with their default values. The number of
-    /// threads to be used in the pool is set when you call
-    /// `build_with_num_threads`.
-    pub fn new() -> ScheduledThreadPoolBuilder<'a> {
-        ScheduledThreadPoolBuilder::default()
-    }
-
-    /// Sets the prefix to be used when naming threads created to be part of the
-    /// pool.
-    ///
-    /// The substring `{}` in the name will be replaced with an integer
-    /// identifier of the thread.
-    ///
-    /// Defaults to `None`.
-    pub fn thread_name_prefix(
-        mut self,
-        thread_name_prefix: Option<&'a str>,
-    ) -> ScheduledThreadPoolBuilder<'a> {
-        self.thread_name_prefix = thread_name_prefix;
-        self
-    }
-
-    /// Sets the behavior for what to do with pending scheduled executions when
-    /// the pool is dropped.
-    ///
-    /// Defaults to [OnPoolDropBehavior::CompletePendingScheduled].
-    pub fn on_drop_behavior(
-        mut self,
-        on_drop_behavior: OnPoolDropBehavior,
-    ) -> ScheduledThreadPoolBuilder<'a> {
-        self.on_drop_behavior = on_drop_behavior;
-        self
-    }
-
-    /// Consumes the builder, returning a new pool.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `num_threads` is 0.
-    pub fn build_with_num_threads(self, num_threads: usize) -> ScheduledThreadPool {
-        assert!(num_threads > 0, "num_threads must be positive");
-        ScheduledThreadPool::new_inner(self.thread_name_prefix, num_threads, self.on_drop_behavior)
-    }
-}
-
-impl<'a> std::fmt::Debug for ScheduledThreadPoolBuilder<'a> {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        fmt.debug_struct("ScheduledThreadPoolBuilder")
-            .field("thread_name_prefix", &self.thread_name_prefix)
-            .field("on_drop_behavior", &self.on_drop_behavior)
-            .finish()
-    }
-}
-
-impl<'a> Default for ScheduledThreadPoolBuilder<'a> {
-    fn default() -> ScheduledThreadPoolBuilder<'a> {
-        ScheduledThreadPoolBuilder {
-            thread_name_prefix: None,
-            on_drop_behavior: OnPoolDropBehavior::CompletePendingScheduled,
-        }
-    }
-}
-
 /// A pool of threads which can run tasks at specific time intervals.
 ///
 /// By default, when the pool drops, all pending scheduled executions will be
@@ -206,11 +137,12 @@ impl ScheduledThreadPool {
     ///
     /// Panics if `num_threads` is 0.
     pub fn new(num_threads: usize) -> ScheduledThreadPool {
-        ScheduledThreadPool::new_inner(
-            None,
-            num_threads,
-            OnPoolDropBehavior::CompletePendingScheduled,
-        )
+        Self::builder().num_threads(num_threads).build()
+    }
+
+    /// Returns a builder type to configure a new pool.
+    pub fn builder() -> builder::NumThreadsStage {
+        NumThreadsStage(())
     }
 
     /// Creates a new thread pool with the specified number of threads which
@@ -222,30 +154,19 @@ impl ScheduledThreadPool {
     /// # Panics
     ///
     /// Panics if `num_threads` is 0.
+    #[deprecated(note = "use ScheduledThreadPool::builder", since = "0.2.7")]
     pub fn with_name(thread_name: &str, num_threads: usize) -> ScheduledThreadPool {
-        ScheduledThreadPool::new_inner(
-            Some(thread_name),
-            num_threads,
-            OnPoolDropBehavior::CompletePendingScheduled,
-        )
+        Self::builder()
+            .num_threads(num_threads)
+            .thread_name_pattern(thread_name)
+            .build()
     }
 
-    /// Returns a builder type to configure a new pool.
-    pub fn builder<'a>() -> ScheduledThreadPoolBuilder<'a> {
-        ScheduledThreadPoolBuilder::new()
-    }
-
-    fn new_inner(
-        thread_name: Option<&str>,
-        num_threads: usize,
-        on_drop_behavior: OnPoolDropBehavior,
-    ) -> ScheduledThreadPool {
-        assert!(num_threads > 0, "num_threads must be positive");
-
+    fn new_inner(builder: FinalStage) -> ScheduledThreadPool {
         let inner = InnerPool {
             queue: BinaryHeap::new(),
             shutdown: false,
-            on_drop_behavior,
+            on_drop_behavior: builder.on_drop_behavior,
         };
 
         let shared = SharedPool {
@@ -257,9 +178,11 @@ impl ScheduledThreadPool {
             shared: Arc::new(shared),
         };
 
-        for i in 0..num_threads {
+        for i in 0..builder.num_threads {
             Worker::start(
-                thread_name.map(|n| n.replace("{}", &i.to_string())),
+                builder
+                    .thread_name_pattern
+                    .map(|n| n.replace("{}", &i.to_string())),
                 pool.shared.clone(),
             );
         }
@@ -534,7 +457,9 @@ mod test {
 
     #[test]
     fn test_works_with_builder() {
-        let pool = ScheduledThreadPool::builder().build_with_num_threads(TEST_TASKS);
+        let pool = ScheduledThreadPool::builder()
+            .num_threads(TEST_TASKS)
+            .build();
 
         let (tx, rx) = channel();
         for _ in 0..TEST_TASKS {
@@ -556,7 +481,7 @@ mod test {
     #[test]
     #[should_panic(expected = "num_threads must be positive")]
     fn test_num_threads_zero_panics_with_builder() {
-        ScheduledThreadPool::builder().build_with_num_threads(0);
+        ScheduledThreadPool::builder().num_threads(0);
     }
 
     #[test]
@@ -619,8 +544,9 @@ mod test {
     #[test]
     fn test_jobs_do_not_complete_after_drop_if_behavior_is_discard() {
         let pool = ScheduledThreadPool::builder()
+            .num_threads(TEST_TASKS)
             .on_drop_behavior(OnPoolDropBehavior::DiscardPendingScheduled)
-            .build_with_num_threads(TEST_TASKS);
+            .build();
         let (tx, rx) = channel();
 
         let tx1 = tx.clone();
@@ -635,8 +561,9 @@ mod test {
     #[test]
     fn test_jobs_do_not_complete_after_drop_if_behavior_is_discard_using_builder() {
         let pool = ScheduledThreadPool::builder()
+            .num_threads(TEST_TASKS)
             .on_drop_behavior(OnPoolDropBehavior::DiscardPendingScheduled)
-            .build_with_num_threads(TEST_TASKS);
+            .build();
         let (tx, rx) = channel();
 
         let tx1 = tx.clone();
@@ -716,8 +643,9 @@ mod test {
         for drop_behavior in [CompletePendingScheduled, DiscardPendingScheduled] {
             let pool = Arc::new(
                 ScheduledThreadPool::builder()
+                    .num_threads(TEST_TASKS)
                     .on_drop_behavior(drop_behavior)
-                    .build_with_num_threads(TEST_TASKS),
+                    .build(),
             );
             let (tx, rx) = channel();
             let (tx2, rx2) = channel();
