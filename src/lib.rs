@@ -92,7 +92,7 @@ impl SharedPool {
         match inner.queue.peek() {
             None => self.cvar.notify_all(),
             Some(e) if e.time > job.time => self.cvar.notify_all(),
-            _ => 0usize,
+            _ => 0,
         };
         inner.queue.push(job);
     }
