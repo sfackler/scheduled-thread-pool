@@ -6,7 +6,6 @@
 #![warn(missing_docs)]
 
 use crate::builder::{FinalStage, NumThreadsStage};
-use parking_lot::{Condvar, Mutex};
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::collections::BinaryHeap;
 use std::panic::{self, AssertUnwindSafe};
@@ -14,6 +13,10 @@ use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::sync::*;
+
+mod sync;
 
 pub mod builder;
 
@@ -92,7 +95,7 @@ impl SharedPool {
         match inner.queue.peek() {
             None => self.cvar.notify_all(),
             Some(e) if e.time > job.time => self.cvar.notify_all(),
-            _ => 0,
+            _ => (),
         };
         inner.queue.push(job);
     }
@@ -406,11 +409,9 @@ impl Worker {
                 Some(e) => Need::WaitTimeout(e.time - now),
             };
 
-            match need {
-                Need::Wait => self.shared.cvar.wait(&mut inner),
-                Need::WaitTimeout(t) => {
-                    self.shared.cvar.wait_until(&mut inner, now + t);
-                }
+            inner = match need {
+                Need::Wait => self.shared.cvar.wait(inner),
+                Need::WaitTimeout(t) => self.shared.cvar.wait_until(inner, t).0,
             };
         }
 

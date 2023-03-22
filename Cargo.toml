@@ -10,5 +10,8 @@ readme = "README.md"
 keywords = ["threadpool", "pool"]
 categories = ["concurrency"]
 
+[features]
+default = ["parking_lot"]
+
 [dependencies]
-parking_lot = "0.12"
+parking_lot = { version = "0.12", optional = true }
