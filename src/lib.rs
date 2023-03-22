@@ -2,9 +2,10 @@
 //!
 //! While a normal thread pool is only able to execute actions as soon as
 //! possible, a scheduled thread pool can execute actions after a specific
-//! delay, or excecute actions periodically.
+//! delay, or execute actions periodically.
 #![warn(missing_docs)]
 
+use crate::builder::{FinalStage, NumThreadsStage};
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::collections::BinaryHeap;
 use std::panic::{self, AssertUnwindSafe};
@@ -14,10 +15,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::sync::*;
-use crate::thunk::Thunk;
 
 mod sync;
-mod thunk;
+
+pub mod builder;
 
 /// A handle to a scheduled job.
 #[derive(Debug)]
@@ -31,7 +32,7 @@ impl JobHandle {
 }
 
 enum JobType {
-    Once(Thunk<'static>),
+    Once(Box<dyn FnOnce() + Send + 'static>),
     FixedRate {
         f: Box<dyn FnMut() + Send + 'static>,
         rate: Duration,
@@ -74,6 +75,7 @@ impl Eq for Job {}
 struct InnerPool {
     queue: BinaryHeap<Job>,
     shutdown: bool,
+    on_drop_behavior: OnPoolDropBehavior,
 }
 
 struct SharedPool {
@@ -99,10 +101,27 @@ impl SharedPool {
     }
 }
 
+/// Options for what the behavior should be in regards to pending scheduled
+/// executions when the pool is dropped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnPoolDropBehavior {
+    /// Any pending scheduled executions will be run, but periodic actions will
+    /// not be rescheduled once these have completed.
+    ///
+    /// This is the default behavior.
+    CompletePendingScheduled,
+
+    /// Don't run any pending scheduled executions.
+    DiscardPendingScheduled,
+}
+
 /// A pool of threads which can run tasks at specific time intervals.
 ///
-/// When the pool drops, all pending scheduled executions will be run, but
-/// periodic actions will not be rescheduled after that.
+/// By default, when the pool drops, all pending scheduled executions will be
+/// run, but periodic actions will not be rescheduled after that.
+///
+/// If you want different behavior on drop then you can specify it using
+/// [OnPoolDropBehavior].
 pub struct ScheduledThreadPool {
     shared: Arc<SharedPool>,
 }
@@ -121,7 +140,12 @@ impl ScheduledThreadPool {
     ///
     /// Panics if `num_threads` is 0.
     pub fn new(num_threads: usize) -> ScheduledThreadPool {
-        ScheduledThreadPool::new_inner(None, num_threads)
+        Self::builder().num_threads(num_threads).build()
+    }
+
+    /// Returns a builder type to configure a new pool.
+    pub fn builder() -> builder::NumThreadsStage {
+        NumThreadsStage(())
     }
 
     /// Creates a new thread pool with the specified number of threads which
@@ -133,16 +157,19 @@ impl ScheduledThreadPool {
     /// # Panics
     ///
     /// Panics if `num_threads` is 0.
+    #[deprecated(note = "use ScheduledThreadPool::builder", since = "0.2.7")]
     pub fn with_name(thread_name: &str, num_threads: usize) -> ScheduledThreadPool {
-        ScheduledThreadPool::new_inner(Some(thread_name), num_threads)
+        Self::builder()
+            .num_threads(num_threads)
+            .thread_name_pattern(thread_name)
+            .build()
     }
 
-    fn new_inner(thread_name: Option<&str>, num_threads: usize) -> ScheduledThreadPool {
-        assert!(num_threads > 0, "num_threads must be positive");
-
+    fn new_inner(builder: FinalStage) -> ScheduledThreadPool {
         let inner = InnerPool {
             queue: BinaryHeap::new(),
             shutdown: false,
+            on_drop_behavior: builder.on_drop_behavior,
         };
 
         let shared = SharedPool {
@@ -154,9 +181,11 @@ impl ScheduledThreadPool {
             shared: Arc::new(shared),
         };
 
-        for i in 0..num_threads {
+        for i in 0..builder.num_threads {
             Worker::start(
-                thread_name.map(|n| n.replace("{}", &i.to_string())),
+                builder
+                    .thread_name_pattern
+                    .map(|n| n.replace("{}", &i.to_string())),
                 pool.shared.clone(),
             );
         }
@@ -177,9 +206,17 @@ impl ScheduledThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
+        self.execute_after_inner(delay, Box::new(job))
+    }
+
+    fn execute_after_inner(
+        &self,
+        delay: Duration,
+        job: Box<dyn FnOnce() + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::Once(Thunk::new(job)),
+            type_: JobType::Once(job),
             time: Instant::now() + delay,
             canceled: canceled.clone(),
         };
@@ -205,12 +242,18 @@ impl ScheduledThreadPool {
     where
         F: FnMut() + Send + 'static,
     {
+        self.execute_at_fixed_rate_inner(initial_delay, rate, Box::new(f))
+    }
+
+    fn execute_at_fixed_rate_inner(
+        &self,
+        initial_delay: Duration,
+        rate: Duration,
+        f: Box<dyn FnMut() + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::FixedRate {
-                f: Box::new(f),
-                rate,
-            },
+            type_: JobType::FixedRate { f, rate },
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
         };
@@ -231,9 +274,17 @@ impl ScheduledThreadPool {
     where
         F: FnMut() -> Option<Duration> + Send + 'static,
     {
+        self.execute_at_dynamic_rate_inner(initial_delay, Box::new(f))
+    }
+
+    fn execute_at_dynamic_rate_inner(
+        &self,
+        initial_delay: Duration,
+        f: Box<dyn FnMut() -> Option<Duration> + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::DynamicRate(Box::new(f)),
+            type_: JobType::DynamicRate(f),
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
         };
@@ -260,12 +311,18 @@ impl ScheduledThreadPool {
     where
         F: FnMut() + Send + 'static,
     {
+        self.execute_with_fixed_delay_inner(initial_delay, delay, Box::new(f))
+    }
+
+    fn execute_with_fixed_delay_inner(
+        &self,
+        initial_delay: Duration,
+        delay: Duration,
+        f: Box<dyn FnMut() + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::FixedDelay {
-                f: Box::new(f),
-                delay,
-            },
+            type_: JobType::FixedDelay { f, delay },
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
         };
@@ -287,9 +344,17 @@ impl ScheduledThreadPool {
     where
         F: FnMut() -> Option<Duration> + Send + 'static,
     {
+        self.execute_with_dynamic_delay_inner(initial_delay, Box::new(f))
+    }
+
+    fn execute_with_dynamic_delay_inner(
+        &self,
+        initial_delay: Duration,
+        f: Box<dyn FnMut() -> Option<Duration> + Send + 'static>,
+    ) -> JobHandle {
         let canceled = Arc::new(AtomicBool::new(false));
         let job = Job {
-            type_: JobType::DynamicDelay(Box::new(f)),
+            type_: JobType::DynamicDelay(f),
             time: Instant::now() + initial_delay,
             canceled: canceled.clone(),
         };
@@ -333,6 +398,13 @@ impl Worker {
             let need = match inner.queue.peek() {
                 None if inner.shutdown => return None,
                 None => Need::Wait,
+                Some(_)
+                    if inner.shutdown
+                        && inner.on_drop_behavior
+                            == OnPoolDropBehavior::DiscardPendingScheduled =>
+                {
+                    return None
+                }
                 Some(e) if e.time <= now => break,
                 Some(e) => Need::WaitTimeout(e.time - now),
             };
@@ -352,7 +424,7 @@ impl Worker {
         }
 
         match job.type_ {
-            JobType::Once(f) => f.invoke(()),
+            JobType::Once(f) => f(),
             JobType::FixedRate { mut f, rate } => {
                 f();
                 let new_job = Job {
@@ -397,11 +469,11 @@ impl Worker {
 
 #[cfg(test)]
 mod test {
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
-    use super::ScheduledThreadPool;
+    use super::{OnPoolDropBehavior, ScheduledThreadPool};
 
     const TEST_TASKS: usize = 4;
 
@@ -421,9 +493,32 @@ mod test {
     }
 
     #[test]
+    fn test_works_with_builder() {
+        let pool = ScheduledThreadPool::builder()
+            .num_threads(TEST_TASKS)
+            .build();
+
+        let (tx, rx) = channel();
+        for _ in 0..TEST_TASKS {
+            let tx = tx.clone();
+            pool.execute(move || {
+                tx.send(1usize).unwrap();
+            });
+        }
+
+        assert_eq!(rx.iter().take(TEST_TASKS).sum::<usize>(), TEST_TASKS);
+    }
+
+    #[test]
     #[should_panic(expected = "num_threads must be positive")]
     fn test_zero_tasks_panic() {
         ScheduledThreadPool::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "num_threads must be positive")]
+    fn test_num_threads_zero_panics_with_builder() {
+        ScheduledThreadPool::builder().num_threads(0);
     }
 
     #[test]
@@ -431,7 +526,7 @@ mod test {
         let pool = ScheduledThreadPool::new(TEST_TASKS);
 
         // Panic all the existing threads.
-        let waiter = Arc::new(Barrier::new(TEST_TASKS as usize));
+        let waiter = Arc::new(Barrier::new(TEST_TASKS));
         for _ in 0..TEST_TASKS {
             let waiter = waiter.clone();
             pool.execute(move || {
@@ -442,7 +537,7 @@ mod test {
 
         // Ensure the pool still works.
         let (tx, rx) = channel();
-        let waiter = Arc::new(Barrier::new(TEST_TASKS as usize));
+        let waiter = Arc::new(Barrier::new(TEST_TASKS));
         for _ in 0..TEST_TASKS {
             let tx = tx.clone();
             let waiter = waiter.clone();
@@ -484,84 +579,127 @@ mod test {
     }
 
     #[test]
-    fn test_fixed_delay_jobs_stop_after_drop() {
-        let pool = Arc::new(ScheduledThreadPool::new(TEST_TASKS));
+    fn test_jobs_do_not_complete_after_drop_if_behavior_is_discard() {
+        let pool = ScheduledThreadPool::builder()
+            .num_threads(TEST_TASKS)
+            .on_drop_behavior(OnPoolDropBehavior::DiscardPendingScheduled)
+            .build();
         let (tx, rx) = channel();
-        let (tx2, rx2) = channel();
 
-        let mut pool2 = Some(pool.clone());
-        let mut i = 0i32;
-        pool.execute_at_fixed_rate(
-            Duration::from_millis(500),
-            Duration::from_millis(500),
-            move || {
-                i += 1;
-                tx.send(i).unwrap();
-                rx2.recv().unwrap();
-                if i == 2 {
-                    drop(pool2.take().unwrap());
-                }
-            },
-        );
+        let tx1 = tx.clone();
+        pool.execute_after(Duration::from_secs(1), move || tx1.send(1usize).unwrap());
+        pool.execute_after(Duration::from_millis(500), move || tx.send(2usize).unwrap());
+
         drop(pool);
 
-        assert_eq!(Ok(1), rx.recv());
-        tx2.send(()).unwrap();
-        assert_eq!(Ok(2), rx.recv());
-        tx2.send(()).unwrap();
         assert!(rx.recv().is_err());
     }
 
     #[test]
-    fn test_dynamic_rate_jobs_stop_after_drop() {
-        let pool = Arc::new(ScheduledThreadPool::new(TEST_TASKS));
+    fn test_jobs_do_not_complete_after_drop_if_behavior_is_discard_using_builder() {
+        let pool = ScheduledThreadPool::builder()
+            .num_threads(TEST_TASKS)
+            .on_drop_behavior(OnPoolDropBehavior::DiscardPendingScheduled)
+            .build();
         let (tx, rx) = channel();
-        let (tx2, rx2) = channel();
 
-        let mut pool2 = Some(pool.clone());
-        let mut i = 0i32;
-        pool.execute_with_dynamic_delay(Duration::from_millis(500), move || {
-            i += 1;
-            tx.send(i).unwrap();
-            rx2.recv().unwrap();
-            if i == 2 {
-                drop(pool2.take().unwrap());
-            }
-            Some(Duration::from_millis(500))
-        });
+        let tx1 = tx.clone();
+        pool.execute_after(Duration::from_secs(1), move || tx1.send(1usize).unwrap());
+        pool.execute_after(Duration::from_millis(500), move || tx.send(2usize).unwrap());
+
         drop(pool);
 
-        assert_eq!(Ok(1), rx.recv());
-        tx2.send(()).unwrap();
-        assert_eq!(Ok(2), rx.recv());
-        tx2.send(()).unwrap();
         assert!(rx.recv().is_err());
+    }
+
+    #[test]
+    fn test_fixed_rate_jobs_stop_after_drop() {
+        test_jobs_stop_after_drop(
+            |pool: &Arc<ScheduledThreadPool>, tx: Sender<i32>, rx2: Receiver<()>| {
+                let mut pool2 = Some(pool.clone());
+                let mut i = 0i32;
+                pool.execute_at_fixed_rate(
+                    Duration::from_millis(500),
+                    Duration::from_millis(500),
+                    move || {
+                        i += 1;
+                        tx.send(i).unwrap();
+                        rx2.recv().unwrap();
+                        if i == 2 {
+                            drop(pool2.take().unwrap());
+                        }
+                    },
+                );
+            },
+        );
     }
 
     #[test]
     fn test_dynamic_delay_jobs_stop_after_drop() {
-        let pool = Arc::new(ScheduledThreadPool::new(TEST_TASKS));
-        let (tx, rx) = channel();
-        let (tx2, rx2) = channel();
+        test_jobs_stop_after_drop(
+            |pool: &Arc<ScheduledThreadPool>, tx: Sender<i32>, rx2: Receiver<()>| {
+                let mut pool2 = Some(pool.clone());
+                let mut i = 0i32;
+                pool.execute_with_dynamic_delay(Duration::from_millis(500), move || {
+                    i += 1;
+                    tx.send(i).unwrap();
+                    rx2.recv().unwrap();
+                    if i == 2 {
+                        drop(pool2.take().unwrap());
+                    }
+                    Some(Duration::from_millis(500))
+                });
+            },
+        );
+    }
 
-        let mut pool2 = Some(pool.clone());
-        let mut i = 0i32;
-        pool.execute_at_dynamic_rate(Duration::from_millis(500), move || {
-            i += 1;
-            tx.send(i).unwrap();
-            rx2.recv().unwrap();
-            if i == 2 {
-                drop(pool2.take().unwrap());
-            }
-            Some(Duration::from_millis(500))
-        });
-        drop(pool);
+    #[test]
+    fn test_dynamic_rate_jobs_stop_after_drop() {
+        test_jobs_stop_after_drop(
+            |pool: &Arc<ScheduledThreadPool>, tx: Sender<i32>, rx2: Receiver<()>| {
+                let mut pool2 = Some(pool.clone());
+                let mut i = 0i32;
+                pool.execute_at_dynamic_rate(Duration::from_millis(500), move || {
+                    i += 1;
+                    tx.send(i).unwrap();
+                    rx2.recv().unwrap();
+                    if i == 2 {
+                        drop(pool2.take().unwrap());
+                    }
+                    Some(Duration::from_millis(500))
+                });
+            },
+        );
+    }
 
-        assert_eq!(Ok(1), rx.recv());
-        tx2.send(()).unwrap();
-        assert_eq!(Ok(2), rx.recv());
-        tx2.send(()).unwrap();
-        assert!(rx.recv().is_err());
+    fn test_jobs_stop_after_drop<F>(mut execute_fn: F)
+    where
+        F: FnMut(&Arc<ScheduledThreadPool>, Sender<i32>, Receiver<()>),
+    {
+        use super::OnPoolDropBehavior::*;
+        for drop_behavior in [CompletePendingScheduled, DiscardPendingScheduled] {
+            let pool = Arc::new(
+                ScheduledThreadPool::builder()
+                    .num_threads(TEST_TASKS)
+                    .on_drop_behavior(drop_behavior)
+                    .build(),
+            );
+            let (tx, rx) = channel();
+            let (tx2, rx2) = channel();
+
+            // Run the provided function that executes something on the pool
+            execute_fn(&pool, tx, rx2);
+
+            // Immediately drop the reference to the pool we have here after the
+            // job has been scheduled
+            drop(pool);
+
+            assert_eq!(Ok(1), rx.recv());
+            tx2.send(()).unwrap();
+            assert_eq!(Ok(2), rx.recv());
+            tx2.send(()).unwrap();
+            assert!(rx.recv().is_err());
+        }
     }
 
     #[test]
