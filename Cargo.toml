@@ -11,4 +11,4 @@ keywords = ["threadpool", "pool"]
 categories = ["concurrency"]
 
 [dependencies]
-parking_lot = "0.12"
+parking_lot = "0.13"
